@@ -237,7 +237,7 @@ def run_pipeline(df_raw, test_size, cv_folds, selected_classifiers, selected_reg
         reg_df=reg_df, reg_cv=reg_cv,
         best_reg_name=best_reg_name, best_reg=best_reg,
         y_te_r=y_te_r, y_pred_best_reg=y_pred_best_reg,
-        X_te_r_sc=X_te_r_sc, y_te_r=y_te_r,
+        X_te_r_sc=X_te_r_sc,
         fi_reg_df=fi_reg_df, perm_reg_df=perm_reg_df,
         X_clf_cols=X_clf.columns.tolist(),
         classifiers=classifiers, regressors=regressors,
