@@ -237,6 +237,7 @@ def run_pipeline(df_raw, test_size, cv_folds, selected_classifiers, selected_reg
         reg_df=reg_df, reg_cv=reg_cv,
         best_reg_name=best_reg_name, best_reg=best_reg,
         y_te_r=y_te_r, y_pred_best_reg=y_pred_best_reg,
+        X_te_r_sc=X_te_r_sc, y_te_r=y_te_r,
         fi_reg_df=fi_reg_df, perm_reg_df=perm_reg_df,
         X_clf_cols=X_clf.columns.tolist(),
         classifiers=classifiers, regressors=regressors,
@@ -511,6 +512,88 @@ with tab_clf:
     st.success(f"🏆 Best Classifier: **{result['best_clf_name']}** "
                f"| F1-Score: **{result['clf_df']['F1-Score'].max():.4f}**")
 
+    # ── GridSearchCV ──────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Step 6 — Hyper-Parameter Tuning (GridSearchCV)</div>',
+                unsafe_allow_html=True)
+    st.info(f"Will tune: **{result['best_clf_name']}** — the best performing classifier. "
+            "This may take 2–5 minutes depending on the model.", icon="⚙️")
+
+    param_grids_clf = {
+        'Logistic Regression':   {'C': [0.01, 0.1, 1, 10], 'solver': ['lbfgs', 'liblinear']},
+        'Decision Tree':         {'max_depth': [None, 5, 10, 20], 'min_samples_split': [2, 5]},
+        'Random Forest':         {'n_estimators': [100, 200], 'max_depth': [None, 10, 20], 'min_samples_split': [2, 5]},
+        'Gradient Boosting':     {'n_estimators': [100, 200], 'learning_rate': [0.05, 0.1], 'max_depth': [3, 5]},
+        'SVM':                   {'C': [0.1, 1, 10], 'kernel': ['rbf', 'linear']},
+        'K-Nearest Neighbours':  {'n_neighbors': [3, 5, 7, 11], 'weights': ['uniform', 'distance']},
+    }
+    pg_clf = param_grids_clf.get(result['best_clf_name'], {})
+    combos_clf = 1
+    for v in pg_clf.values():
+        combos_clf *= len(v)
+
+    with st.expander(f"📋 Parameter Grid — {result['best_clf_name']} "
+                     f"({combos_clf} combinations × {cv_folds} folds = {combos_clf * cv_folds} fits)"):
+        for param, values in pg_clf.items():
+            st.write(f"**{param}:** {values}")
+
+    if st.button("🔍 Tune Best Classifier (GridSearchCV)",
+                 use_container_width=True, key="gs_clf"):
+        with st.spinner(f"Running GridSearchCV on {result['best_clf_name']}... ⏳"):
+            base_models_clf = {
+                'Logistic Regression':   LogisticRegression(max_iter=1000, random_state=42),
+                'Decision Tree':         DecisionTreeClassifier(random_state=42),
+                'Random Forest':         RandomForestClassifier(random_state=42),
+                'Gradient Boosting':     GradientBoostingClassifier(random_state=42),
+                'SVM':                   SVC(probability=True, random_state=42),
+                'K-Nearest Neighbours':  KNeighborsClassifier(),
+            }
+            tuned_clf_model = base_models_clf[result['best_clf_name']]
+            skf_gs = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+            gs_clf = GridSearchCV(tuned_clf_model, pg_clf, cv=skf_gs,
+                                  scoring='f1_weighted', n_jobs=-1, verbose=0)
+            gs_clf.fit(result['X_te_c_sc'], result['y_te_c'])
+            y_pred_gs_clf = gs_clf.best_estimator_.predict(result['X_te_c_sc'])
+            gs_clf_f1  = f1_score(result['y_te_c'], y_pred_gs_clf, average='weighted')
+            gs_clf_acc = accuracy_score(result['y_te_c'], y_pred_gs_clf)
+
+        st.success("GridSearchCV complete! ✅")
+
+        gc1, gc2, gc3 = st.columns(3)
+        gc1.metric("Best CV F1-Score", f"{gs_clf.best_score_:.4f}")
+        gc2.metric("Test F1 (Tuned)", f"{gs_clf_f1:.4f}",
+                   delta=f"{gs_clf_f1 - result['clf_df'].loc[result['best_clf_name'], 'F1-Score']:+.4f}")
+        gc3.metric("Test Accuracy (Tuned)", f"{gs_clf_acc:.4f}")
+
+        st.markdown("**Best Parameters Found:**")
+        st.dataframe(pd.DataFrame([gs_clf.best_params_]), use_container_width=True)
+
+        with st.expander("📊 Full GridSearch CV Results Table"):
+            gs_cv_df = pd.DataFrame(gs_clf.cv_results_)[
+                ['params', 'mean_test_score', 'std_test_score', 'rank_test_score']
+            ].sort_values('rank_test_score').round(4)
+            gs_cv_df.columns = ['Parameters', 'Mean F1', 'Std F1', 'Rank']
+            st.dataframe(gs_cv_df, use_container_width=True)
+
+        # Before vs After comparison chart
+        before_f1 = result['clf_df'].loc[result['best_clf_name'], 'F1-Score']
+        before_acc = result['clf_df'].loc[result['best_clf_name'], 'Accuracy']
+        fig, ax = plt.subplots(figsize=(7, 4))
+        x = np.arange(2)
+        ax.bar(x - 0.2, [before_f1, gs_clf_f1], 0.35,
+               color=['#9C27B0', '#4CAF50'], alpha=0.85, label='F1-Score')
+        ax.bar(x + 0.2, [before_acc, gs_clf_acc], 0.35,
+               color=['#2196F3', '#FF9800'], alpha=0.85, label='Accuracy')
+        ax.set_xticks(x)
+        ax.set_xticklabels(['Default', 'Tuned'])
+        ax.set_ylim(0, 1.15); ax.set_ylabel('Score')
+        ax.set_title(f'Default vs Tuned — {result["best_clf_name"]}', fontweight='bold')
+        ax.legend(); ax.grid(axis='y', alpha=0.3)
+        for i, (f1, acc) in enumerate([(before_f1, before_acc), (gs_clf_f1, gs_clf_acc)]):
+            ax.text(i - 0.2, f1 + 0.01, f'{f1:.4f}', ha='center', fontsize=9, fontweight='bold')
+            ax.text(i + 0.2, acc + 0.01, f'{acc:.4f}', ha='center', fontsize=9, fontweight='bold')
+        plt.tight_layout()
+        st.pyplot(fig); plt.close()
+
 # ────────────────────────────────────────────────────────────────────────────
 # TAB 3 — REGRESSION
 # ────────────────────────────────────────────────────────────────────────────
@@ -567,6 +650,95 @@ with tab_reg:
 
     st.success(f"🏆 Best Regressor: **{result['best_reg_name']}** "
                f"| R²: **{result['reg_df']['R2'].max():.4f}**")
+
+    # ── GridSearchCV ──────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Step 4 — Hyper-Parameter Tuning (GridSearchCV)</div>',
+                unsafe_allow_html=True)
+    st.info(f"Will tune: **{result['best_reg_name']}** — the best performing regressor. "
+            "This may take 2–5 minutes depending on the model.", icon="⚙️")
+
+    param_grids_reg = {
+        'Linear Regression':  {},
+        'Ridge':              {'alpha': [0.01, 0.1, 1, 10, 100]},
+        'Lasso':              {'alpha': [0.001, 0.01, 0.1, 1]},
+        'Decision Tree':      {'max_depth': [None, 5, 10, 20], 'min_samples_split': [2, 5]},
+        'Random Forest':      {'n_estimators': [100, 200], 'max_depth': [None, 10, 20], 'min_samples_split': [2, 5]},
+        'Gradient Boosting':  {'n_estimators': [100, 200], 'learning_rate': [0.05, 0.1], 'max_depth': [3, 5]},
+    }
+    pg_reg = param_grids_reg.get(result['best_reg_name'], {})
+
+    if not pg_reg:
+        st.warning("Linear Regression has no hyperparameters to tune.")
+    else:
+        combos_reg = 1
+        for v in pg_reg.values():
+            combos_reg *= len(v)
+
+        with st.expander(f"📋 Parameter Grid — {result['best_reg_name']} "
+                         f"({combos_reg} combinations × {cv_folds} folds = {combos_reg * cv_folds} fits)"):
+            for param, values in pg_reg.items():
+                st.write(f"**{param}:** {values}")
+
+        if st.button("🔍 Tune Best Regressor (GridSearchCV)",
+                     use_container_width=True, key="gs_reg"):
+            with st.spinner(f"Running GridSearchCV on {result['best_reg_name']}... ⏳"):
+                base_models_reg = {
+                    'Ridge':             Ridge(),
+                    'Lasso':             Lasso(max_iter=5000),
+                    'Decision Tree':     DecisionTreeRegressor(random_state=42),
+                    'Random Forest':     RandomForestRegressor(random_state=42),
+                    'Gradient Boosting': GradientBoostingRegressor(random_state=42),
+                }
+                tuned_reg_model = base_models_reg[result['best_reg_name']]
+                kf_gs = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+                gs_reg = GridSearchCV(tuned_reg_model, pg_reg, cv=kf_gs,
+                                      scoring='r2', n_jobs=-1, verbose=0)
+                gs_reg.fit(result['X_te_r_sc'], result['y_te_r'])
+                y_pred_gs_reg = gs_reg.best_estimator_.predict(result['X_te_r_sc'])
+                gs_reg_r2   = r2_score(result['y_te_r'], y_pred_gs_reg)
+                gs_reg_rmse = np.sqrt(mean_squared_error(result['y_te_r'], y_pred_gs_reg))
+                gs_reg_mae  = mean_absolute_error(result['y_te_r'], y_pred_gs_reg)
+
+            st.success("GridSearchCV complete! ✅")
+
+            gr1, gr2, gr3, gr4 = st.columns(4)
+            gr1.metric("Best CV R²", f"{gs_reg.best_score_:.4f}")
+            gr2.metric("Test R² (Tuned)", f"{gs_reg_r2:.4f}",
+                       delta=f"{gs_reg_r2 - result['reg_df'].loc[result['best_reg_name'], 'R2']:+.4f}")
+            gr3.metric("Test RMSE (Tuned)", f"{gs_reg_rmse:.4f}")
+            gr4.metric("Test MAE (Tuned)", f"{gs_reg_mae:.4f}")
+
+            st.markdown("**Best Parameters Found:**")
+            st.dataframe(pd.DataFrame([gs_reg.best_params_]), use_container_width=True)
+
+            with st.expander("📊 Full GridSearch CV Results Table"):
+                gs_reg_df = pd.DataFrame(gs_reg.cv_results_)[
+                    ['params', 'mean_test_score', 'std_test_score', 'rank_test_score']
+                ].sort_values('rank_test_score').round(4)
+                gs_reg_df.columns = ['Parameters', 'Mean R²', 'Std R²', 'Rank']
+                st.dataframe(gs_reg_df, use_container_width=True)
+
+            # Before vs After comparison chart
+            before_r2   = result['reg_df'].loc[result['best_reg_name'], 'R2']
+            before_rmse = result['reg_df'].loc[result['best_reg_name'], 'RMSE']
+            before_mae  = result['reg_df'].loc[result['best_reg_name'], 'MAE']
+
+            fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+            for ax_i, (metric, vals, col, label) in zip(axes, [
+                ('R²',   [before_r2,   gs_reg_r2],   ['#9C27B0', '#4CAF50'], 'R²  (higher = better)'),
+                ('RMSE', [before_rmse, gs_reg_rmse], ['#F44336', '#FF9800'], 'RMSE (lower = better)'),
+                ('MAE',  [before_mae,  gs_reg_mae],  ['#2196F3', '#03A9F4'], 'MAE  (lower = better)'),
+            ]):
+                bars = ax_i.bar(['Default', 'Tuned'], vals, color=col, alpha=0.85, edgecolor='white')
+                ax_i.set_title(label, fontweight='bold', fontsize=10)
+                ax_i.grid(axis='y', alpha=0.3)
+                for bar, val in zip(bars, vals):
+                    ax_i.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.005,
+                              f'{val:.4f}', ha='center', fontsize=9, fontweight='bold')
+            plt.suptitle(f'Default vs Tuned — {result["best_reg_name"]}',
+                         fontweight='bold', fontsize=12)
+            plt.tight_layout()
+            st.pyplot(fig); plt.close()
 
 # ────────────────────────────────────────────────────────────────────────────
 # TAB 4 — EXPLAINABLE AI
